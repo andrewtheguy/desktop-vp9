@@ -1268,7 +1268,13 @@ mod tests {
     }
 
     /// An odd side is carried as it is, at both chromas, and decodes at its own
-    /// size.
+    /// size, every sample to its last row and column within a step of the
+    /// planes the encoder was given.
+    ///
+    /// Judged on the planes rather than on RGB: the conversions either side of
+    /// the codec are the `yuv` crate's, whose AVX2, NEON and scalar paths round
+    /// differently, so a colour read back through them lands a CPU-dependent
+    /// few levels from where it started however well the codec did.
     #[test]
     fn an_odd_sized_picture_encodes_and_decodes_at_its_own_size() {
         let (w, h) = (33u16, 17u16);
@@ -1280,11 +1286,17 @@ mod tests {
             let decoded = decoder.decode(&frame).expect("a decode");
             assert_eq!(decoded.size(), (33, 17), "{chroma:?}");
             assert_eq!(decoded.chroma(), chroma);
+            let sizes = [(33, 17), chroma.plane_size(33, 17), chroma.plane_size(33, 17)];
+            let (given, given_strides) = (source.planes(), source.strides());
+            let (got, got_strides) = (decoded.planes(), decoded.strides());
+            for (plane, (pw, ph)) in sizes.into_iter().enumerate() {
+                for (x, y) in (0..ph).flat_map(|y| (0..pw).map(move |x| (x, y))) {
+                    let (want, have) = (given[plane][y * given_strides[plane] + x], got[plane][y * got_strides[plane] + x]);
+                    assert!(want.abs_diff(have) <= 1, "{chroma:?} plane {plane} at {x},{y}: {have}, given {want}");
+                }
+            }
             let mut out = vec![0; 33 * 17 * 4];
             decoded.write_bgrx(&mut out, 33 * 4).expect("a picture that fits");
-            for pixel in out.as_chunks::<4>().0 {
-                assert!(pixel[0].abs_diff(90) <= 3 && pixel[1].abs_diff(180) <= 3 && pixel[2].abs_diff(40) <= 3, "{chroma:?}: {pixel:?}");
-            }
         }
         // 1919×1079 as a desktop is, at the size the gateway once padded.
         let source = picture(1919, 1079, Chroma::Subsampled, &flat(1919, 1079, [90, 90, 90]));
