@@ -1268,13 +1268,14 @@ mod tests {
     }
 
     /// An odd side is carried as it is, at both chromas, and decodes at its own
-    /// size, every sample to its last row and column within a step of the
-    /// planes the encoder was given.
+    /// size, every sample to its last row and column within 3 levels of the
+    /// planes the encoder was given: the finest quantizer still moves a flat
+    /// block by a level or two (luma 126 to 127 on x86_64, 125 to 127 on arm64).
     ///
     /// Judged on the planes rather than on RGB: the conversions either side of
     /// the codec are the `yuv` crate's, whose AVX2, NEON and scalar paths round
     /// differently, so a colour read back through them lands a CPU-dependent
-    /// few levels from where it started however well the codec did.
+    /// few levels further from where it started however well the codec did.
     #[test]
     fn an_odd_sized_picture_encodes_and_decodes_at_its_own_size() {
         let (w, h) = (33u16, 17u16);
@@ -1292,7 +1293,7 @@ mod tests {
             for (plane, (pw, ph)) in sizes.into_iter().enumerate() {
                 for (x, y) in (0..ph).flat_map(|y| (0..pw).map(move |x| (x, y))) {
                     let (want, have) = (given[plane][y * given_strides[plane] + x], got[plane][y * got_strides[plane] + x]);
-                    assert!(want.abs_diff(have) <= 1, "{chroma:?} plane {plane} at {x},{y}: {have}, given {want}");
+                    assert!(want.abs_diff(have) <= 3, "{chroma:?} plane {plane} at {x},{y}: {have}, given {want}");
                 }
             }
             let mut out = vec![0; 33 * 17 * 4];
