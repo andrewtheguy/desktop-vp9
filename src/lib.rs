@@ -1434,4 +1434,149 @@ mod tests {
         let mut out = [0; 10];
         assert!(matches!(decoded.write_bgrx(&mut out, 128), Err(Error::Buffer { .. })));
     }
+
+    /// The walk and a live encoder together, on a link that carries so many
+    /// bytes a second: every move of the dial reaches the encoder without a
+    /// keyframe, the frames answer it in size and in sharpness, an independent
+    /// decoder takes every one of them, and the walk settles where the link
+    /// keeps up and comes back to the ceiling once it widens.
+    ///
+    /// The picture is new every frame, as a video playing on the desktop is, so
+    /// a frame's size answers to the quantizer; the link is half of what the
+    /// ceiling costs, measured on an encoder of its own. Time is simulated —
+    /// the walk takes `now` — so the run takes as long as its encodes.
+    #[test]
+    fn a_walk_moves_a_live_encoder_to_what_a_link_bears_and_back() {
+        use std::collections::VecDeque;
+        use std::time::{Duration, Instant};
+        use walk::{Pace, QualityWalk, QUALITY_FLOOR};
+
+        const W: u16 = 128;
+        const H: u16 = 96;
+        const CEILING: u8 = 90;
+        /// 30 Hz.
+        const FRAME: Duration = Duration::from_micros(33_333);
+        /// Each way, so the link's floor is twice this and a frame's time on the
+        /// wire: what the walk learns to read as distance rather than queueing.
+        const ONE_WAY: Duration = Duration::from_millis(20);
+
+        /// Noise new every frame.
+        fn churning(step: u32) -> Picture {
+            let rgb: Vec<u8> = (0..u32::from(W) * u32::from(H))
+                .flat_map(|at| {
+                    let v = ((at.wrapping_mul(2_654_435_761) ^ step.wrapping_mul(40_503)).wrapping_mul(2_246_822_519) >> 24) as u8;
+                    [v, v / 2 + 40, 255 - v]
+                })
+                .collect();
+            picture(W, H, Chroma::Subsampled, &rgb)
+        }
+
+        /// A frame as it went out.
+        struct Sent {
+            quality: u8,
+            bytes: usize,
+            /// How long it waited behind the frames before it for the wire.
+            queued: Duration,
+            /// Mean distance of the decoded luma from the luma encoded.
+            error: f64,
+        }
+
+        struct Session {
+            encoder: Encoder,
+            decoder: Decoder,
+            walk: QualityWalk,
+            now: Instant,
+            /// When the wire is next free.
+            free: Instant,
+            /// Fences on their way back: when each arrives, the delivery it
+            /// reports, and whether it is a verdict.
+            fences: VecDeque<(Instant, Duration, bool)>,
+            step: u32,
+        }
+
+        impl Session {
+            /// `span` of frames onto a link that carries `capacity` bytes a second.
+            fn run(&mut self, capacity: f64, span: Duration) -> Vec<Sent> {
+                let end = self.now + span;
+                let mut sent = Vec::new();
+                while self.now < end {
+                    while let Some((back, delivery, verdict)) = self.fences.front().copied().filter(|(back, ..)| *back <= self.now) {
+                        self.fences.pop_front();
+                        if let Some(pace) = self.walk.fenced(delivery, verdict, back) {
+                            self.encoder.set_quality(pace.quality).expect("the encoder to take the walk's quality");
+                        }
+                    }
+                    assert_eq!(self.encoder.quality(), self.walk.quality(), "the encoder is not coding what the walk holds");
+
+                    let source = churning(self.step);
+                    let (frame, keyframe) = encode(&mut self.encoder, &source, false);
+                    assert_eq!(keyframe, self.step == 0, "frame {}: a move of the dial cost a keyframe", self.step);
+                    let decoded = self.decoder.decode(&frame).expect("a decode");
+                    assert_eq!(decoded.size(), (u32::from(W), u32::from(H)));
+                    let (given, stride) = (source.planes()[0], source.strides()[0]);
+                    let (got, got_stride) = (decoded.planes()[0], decoded.strides()[0]);
+                    let distance: u64 = (0..usize::from(H))
+                        .flat_map(|y| (0..usize::from(W)).map(move |x| (x, y)))
+                        .map(|(x, y)| u64::from(given[y * stride + x].abs_diff(got[y * got_stride + x])))
+                        .sum();
+                    if keyframe {
+                        self.walk.keyframe(self.now);
+                    }
+
+                    let queued = self.free.saturating_duration_since(self.now);
+                    self.free = self.free.max(self.now) + Duration::from_secs_f64(frame.len() as f64 / capacity);
+                    let back = self.free + 2 * ONE_WAY;
+                    self.fences.push_back((back, back - self.now, !keyframe));
+                    sent.push(Sent { quality: self.encoder.quality(), bytes: frame.len(), queued, error: distance as f64 / f64::from(W) / f64::from(H) });
+                    self.step += 1;
+                    self.now += self.walk.interval();
+                }
+                sent
+            }
+        }
+
+        // A second of delta frames at `quality`, on an encoder of its own.
+        let per_second = |quality| {
+            let mut encoder = Encoder::new(W, H, Chroma::Subsampled, quality, 2).expect("an encoder");
+            (0..31).map(|step| encode(&mut encoder, &churning(step), false).0.len()).skip(1).sum::<usize>() as f64
+        };
+        let (ceiling, floor) = (per_second(CEILING), per_second(QUALITY_FLOOR));
+        let narrow = ceiling / 2.0;
+        assert!(floor < narrow / 2.0, "the floor costs {floor} bytes a second against a link of {narrow}: the picture does not answer to the quantizer");
+
+        let start = Instant::now();
+        let mut session = Session {
+            encoder: Encoder::new(W, H, Chroma::Subsampled, CEILING, 2).expect("an encoder"),
+            decoder: Decoder::new(1).expect("a decoder"),
+            walk: QualityWalk::new(CEILING, FRAME, true),
+            now: start,
+            free: start,
+            fences: VecDeque::new(),
+            step: 0,
+        };
+        let mean = |frames: &[Sent], of: fn(&Sent) -> f64| frames.iter().map(of).sum::<f64>() / frames.len() as f64;
+
+        // Long enough to settle: the keyframe's hold, the queue the ceiling built
+        // behind it drained, a step up refused and walked back.
+        let behind = session.run(narrow, Duration::from_secs(25));
+        let fine = &behind[1..31];
+        let settled = &behind[behind.len() - 150..];
+        let quality = session.walk.quality();
+        assert!(QUALITY_FLOOR < quality && quality < CEILING, "the walk settled at {quality} on a link half the ceiling's width");
+        assert!(!session.walk.slowed(), "the frames did not come back once the quality had been given up");
+        assert!(settled.iter().all(|sent| sent.queued < walk::LAG_CLEAR), "the link is still behind five seconds from the end");
+        let (fine_bytes, settled_bytes) = (mean(fine, |sent| sent.bytes as f64), mean(settled, |sent| sent.bytes as f64));
+        assert!(settled_bytes < fine_bytes * 0.6, "frames at {quality} averaged {settled_bytes:.0} bytes against {fine_bytes:.0} at the ceiling");
+        let (fine_error, settled_error) = (mean(fine, |sent| sent.error), mean(settled, |sent| sent.error));
+        assert!(settled_error > fine_error * 2.0, "frames at {quality} decoded at error {settled_error:.2} against {fine_error:.2} at the ceiling");
+
+        // Long enough for the hold on the quality the link refused to run out,
+        // and the steps up from under it.
+        let wide = session.run(ceiling * 4.0, Duration::from_secs(20));
+        assert_eq!(session.walk.pace(), Pace { quality: CEILING, interval: FRAME });
+        let back = &wide[wide.len() - 30..];
+        assert!(back.iter().all(|sent| sent.quality == CEILING));
+        let back_error = mean(back, |sent| sent.error);
+        assert!(back_error < fine_error * 1.25, "back at the ceiling the frames decoded at error {back_error:.2}, against {fine_error:.2} before");
+    }
 }
