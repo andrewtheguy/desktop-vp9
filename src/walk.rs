@@ -39,6 +39,8 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use crate::{QUALITY_MAX, QUALITY_MIN};
+
 /// How long writing a frame may block before it counts as one the link could
 /// not keep up with. More than half a frame at 30 Hz. The queues between the
 /// encoder and the socket are shallow on purpose, so this stays at zero while
@@ -233,7 +235,13 @@ impl QualityWalk {
     /// frames that come `frame` apart when the link is not slowed; `adaptive`
     /// is whether the client's lag moves it, and without it only a blocked
     /// write does.
+    ///
+    /// `ceiling` is clamped to the dial as the encoder clamps it: a walk above
+    /// [`QUALITY_MAX`] would spend its first steps down where the encoder had
+    /// already stopped, giving up nothing while the link fell further behind,
+    /// and one below [`QUALITY_MIN`] would hold a quality the encoder is not at.
     pub fn new(ceiling: u8, frame: Duration, adaptive: bool) -> Self {
+        let ceiling = ceiling.clamp(QUALITY_MIN, QUALITY_MAX);
         Self {
             ceiling,
             lag_aware: adaptive,
@@ -541,6 +549,45 @@ mod tests {
         assert_eq!(moved, None);
         assert_eq!(walk.pace(), Pace { quality: 30, interval: CAPTURE });
         assert_eq!(walk.ceiling(), 30);
+    }
+
+    /// A ceiling off the dial is clamped to it, as the encoder clamps it: the
+    /// first step down is one the encoder takes, and the bottom of the dial is
+    /// a quality the encoder can be at.
+    #[test]
+    fn a_ceiling_off_the_dial_is_clamped_to_it() {
+        let start = Instant::now();
+        let mut walk = walk(u8::MAX, start);
+        assert_eq!(walk.ceiling(), QUALITY_MAX);
+        assert_eq!(walk.pace(), Pace { quality: QUALITY_MAX, interval: CAPTURE });
+        walk.fenced(140 * MS, true, start);
+        assert_eq!(walk.fenced(140 * MS, true, start).map(|pace| pace.quality), Some(QUALITY_MAX - STEP_DOWN));
+        let bottom = QualityWalk::new(0, CAPTURE, true);
+        assert_eq!(bottom.ceiling(), QUALITY_MIN);
+        assert_eq!(bottom.pace(), Pace { quality: QUALITY_MIN, interval: CAPTURE });
+    }
+
+    /// A ceiling under the floor is on the floor from the start: a link behind
+    /// takes frames, a clear one gives them back, and the quality stays the one
+    /// that was asked for.
+    #[test]
+    fn a_ceiling_under_the_floor_gives_up_frames_alone() {
+        let start = Instant::now();
+        let ceiling = QUALITY_FLOOR / 2;
+        let mut walk = walk(ceiling, start);
+        walk.fenced(140 * MS, true, start);
+        assert_eq!(walk.fenced(140 * MS, true, start), Some(Pace { quality: ceiling, interval: CAPTURE * 2 }));
+        let later = start + ADJUST_COOLDOWN;
+        walk.fenced(140 * MS, true, later);
+        assert_eq!(walk.fenced(140 * MS, true, later), Some(Pace { quality: ceiling, interval: CAPTURE * 4 }));
+        let mut at = later + ADJUST_COOLDOWN;
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            let (moved, then) = clear(&mut walk, CLEAR_RUN, at);
+            seen.extend(moved);
+            at = then + ADJUST_COOLDOWN;
+        }
+        assert_eq!(seen, [Pace { quality: ceiling, interval: CAPTURE * 2 }, Pace { quality: ceiling, interval: CAPTURE }]);
     }
 
     #[test]
