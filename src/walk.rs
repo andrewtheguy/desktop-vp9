@@ -1,10 +1,13 @@
 //! The quality and frame rate a link will bear, walked on the 1–100 dial.
 //!
-//! The configured quality is a ceiling and [`QUALITY_FLOOR`] the floor; between
-//! them the dial walks down when the client falls behind and back up when it
-//! keeps up, and past the floor it is the frame rate that goes. The signal is
-//! queueing: time a frame spent behind frames the link or the client could not
-//! take as fast as they came. Where it is read from is the caller's: how long
+//! The configured quality is a ceiling. For a ceiling at or above
+//! [`QUALITY_FLOOR`], that is the adaptive floor; a lower ceiling stays at its
+//! own quality and gives up frame rate alone. Between the ceiling and floor the
+//! dial walks down when the client falls behind and back up when it keeps up,
+//! and at the floor it is the frame rate that goes. Severe queueing can move
+//! both in the same step. The signal is queueing: time a frame spent behind
+//! frames the link or the client could not take as fast as they came. Where it
+//! is read from is the caller's: how long
 //! writing the frame blocked, which is the socket having no room; the round
 //! trip of a fence the client answers once it has the frame, less the link's
 //! own floor, the shortest delivery seen lately, so a distant link that keeps
@@ -18,10 +21,11 @@
 //! and slow to take it back, in steps that double while the link keeps taking
 //! them and stop short of a quality it refused, so a link that is
 //! intermittently bad settles at a quality it can hold rather than oscillating
-//! around one it cannot. Two knobs in a fixed order: quality down to the floor,
-//! then the frame interval doubled up to `SLOW_MAX` times; frames back first
-//! and quality after. The dial rather than a quantizer, because a quantizer is
-//! the codec's own scale and the mapping lives with the encoder.
+//! around one it cannot. Ordinarily quality goes down to the floor before the
+//! frame interval is doubled up to `SLOW_MAX` times; severe queueing moves both
+//! at once. Frames come back first and quality after. The dial rather than a
+//! quantizer, because a quantizer is the codec's own scale and the mapping lives
+//! with the encoder.
 //!
 //! What the walk holds is what a *moving* picture is coded at. A desktop that
 //! went quiet below the ceiling is sharpened there once — [`QualityWalk::settle`]
@@ -142,15 +146,16 @@ const REFUSAL_HOLD: Duration = Duration::from_secs(15);
 /// See [`REFUSAL_HOLD`].
 const REFUSAL_WINDOW: Duration = Duration::from_secs(4);
 
-/// The coarsest a moving picture is coded at before the frames go: the walk's
-/// floor, and the point where it hands off to the frame rate. Fixed rather
+/// The adaptive quality floor. Ordinary lag walks a ceiling at or above it down
+/// here before the frames go; severe lag can slow the frames sooner. A lower
+/// ceiling remains below it and gives up frames from the start. Fixed rather
 /// than configured, as every adaptive stream's is — WebRTC's quality scaler
 /// hands off to resolution and frame rate at an internal quantizer threshold
 /// in the coarsest fifth of VP9's range, TigerVNC's AutoSelect has a built-in
 /// bottom rung — because past it a finer quantizer step buys nothing a viewer
 /// can see, and the settle sharpens a quiet desktop at the ceiling whatever
-/// the walk holds. A ceiling below it is on the floor from the start and
-/// gives up frames alone.
+/// the walk holds. A ceiling below it starts in the frame-rate handoff and gives
+/// up frames alone.
 pub const QUALITY_FLOOR: u8 = 20;
 
 /// How many times the frame interval may be doubled — a 30 Hz stream down to
@@ -159,9 +164,9 @@ pub const QUALITY_FLOOR: u8 = 20;
 /// floor bounds only the first: on a 2 Mbit/s link the picture ran 0.7 s
 /// behind at the floor with nothing left to give up, and with the frames going
 /// as well it ran 0.2 s behind at a fifth of the frames, every one of them
-/// fresh. The quality goes first because a coarser picture of every movement
-/// reads better than a sharp one of every fourth, and comes back last for the
-/// same reason.
+/// fresh. Quality ordinarily goes first because a coarser picture of every
+/// movement reads better than a sharp one of every fourth; severe queueing can
+/// move both at once. Frames come back first for the same reason.
 const SLOW_MAX: u8 = 3;
 
 /// How far back the deliveries go whose minimum is the link's floor. A window
@@ -312,8 +317,8 @@ impl QualityWalk {
         self.quality = quality;
     }
 
-    /// Whether the link has been slowed past the floor: the frames are going,
-    /// and [`Self::interval`] is more than the frame's.
+    /// Whether the frame rate has been slowed: [`Self::interval`] is more than
+    /// the frame's.
     pub fn slowed(&self) -> bool {
         self.slow > 0
     }
@@ -462,8 +467,8 @@ impl QualityWalk {
         self.held_until = Some(now + KEYFRAME_HOLD);
     }
 
-    /// Give quality up, or frames once there is no quality left to give.
-    /// `false` when there is nothing left of either.
+    /// Give quality up, and give frames up too once there is no quality left or
+    /// the lag is severe. `false` when there is nothing left of either.
     fn give_up(&mut self, lag: Duration, now: Instant) -> bool {
         let steps = if lag >= LAG_SEVERE {
             3
@@ -609,7 +614,7 @@ mod tests {
         assert_eq!(bottom.pace(), Pace { quality: QUALITY_MIN, interval: CAPTURE });
     }
 
-    /// A ceiling under the floor is on the floor from the start: a link behind
+    /// A ceiling under the floor starts in the frame-rate handoff: a link behind
     /// takes frames, a clear one gives them back, and the quality stays the one
     /// that was asked for.
     #[test]
