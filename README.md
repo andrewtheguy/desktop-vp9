@@ -22,5 +22,5 @@ nothing is configured or installed at build time.
 Use it by release tag:
 
 ```toml
-desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0.3" }
+desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0.4" }
 ```
