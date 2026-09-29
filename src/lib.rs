@@ -10,23 +10,25 @@
 //! back, for every test here and in a user, which reads what the encoder made
 //! with the other half of the same archive.
 //!
-//! What a frame says about itself is read here too: [`frame_header`] for the
-//! profile and keyframe bit of a frame this process did not encode, and
-//! [`codec_string`] for the WebCodecs string a browser's `VideoDecoder` is
-//! configured with, since VP9 carries no parameter sets a client could read one
-//! out of.
+//! Frame metadata is handled here too: [`frame_header`] reads the profile and
+//! keyframe bit of a frame this process did not encode, and [`codec_string`]
+//! builds the WebCodecs string a browser's `VideoDecoder` is configured with
+//! from a stream's size, chroma and frame rate. VP9 carries no parameter sets a
+//! client could read that string out of.
 //!
 //! The dial is walked here too: [`walk::QualityWalk`] gives quality up when the
-//! link is behind, then the frame rate, and takes them back when it keeps up,
-//! the same walk for a stream wlshare codes and one the gateway does. What is
-//! not here is the rest of *when*: which picture to encode, where the link's
-//! lag is read from, how a frame is framed on a wire. Each user keeps its own.
+//! link is behind and frame rate once the quality reaches its floor; severe lag
+//! can reduce both at once. It takes them back when the link keeps up, the same
+//! walk for a stream wlshare codes and one the gateway does. What is not here is
+//! the rest of *when*: which picture to encode, where the link's lag is read
+//! from, how a frame is framed on a wire. Each user keeps its own.
 //!
 //! Two things about libvpx's shape are worth knowing before reading:
 //!
-//! - **It returns error codes rather than asserting.** Every call goes through
-//!   [`check`], which turns a bad code into an [`Error`] carrying libvpx's own
-//!   explanation, so a failure ends one stream instead of the process.
+//! - **It returns error codes rather than asserting.** Every fallible call that
+//!   returns a status code goes through `check`, which turns a bad code into an
+//!   [`enum@Error`] carrying libvpx's own explanation, so a failure ends one
+//!   stream instead of the process.
 //! - **Its C API is entirely `unsafe` and largely out-parameters.** The
 //!   invariants are stated at each call. Two are easy to get wrong and neither
 //!   announces itself: the image built by `vpx_img_wrap` borrows the caller's
@@ -89,15 +91,15 @@ fn tile_columns_log2(width: u16, threads: usize) -> u32 {
 /// and nothing else.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Chroma {
-    /// 4:2:0 — one colour sample per 2×2 pixels, VP9 profile 0. The one every VP9
-    /// decoder takes, hardware ones included.
+    /// 4:2:0 — one colour sample per 2×2 pixels, VP9 profile 0: the broadly
+    /// supported profile, including by hardware decoders.
     Subsampled,
     /// 4:4:4 — a colour sample per pixel, VP9 profile 1. On a desktop this, not
     /// the quantizer, is where the visible loss is: a one-pixel coloured glyph
     /// stem on a dark terminal shares its one 4:2:0 colour sample with three
     /// pixels of background and comes back at a fraction of its saturation, at
-    /// any quality. No hardware VP9 decoder takes profile 1, so it always
-    /// decodes in software.
+    /// any quality. Hardware support for VP9 profile 1 is not universal, so a
+    /// caller that depends on hardware decoding has to check its decoder.
     Full,
 }
 
@@ -325,9 +327,9 @@ impl Picture {
 
 /// One VP9 stream at one picture size and chroma: a libvpx encoder whose
 /// quantizer is pinned to the dial. A picture of another size or chroma needs
-/// another encoder, whose first frame is a keyframe by construction — every
-/// frame is expressed as a change from the last one, which is what makes an
-/// inter-frame stream mean anything.
+/// another encoder, whose first frame is a keyframe by construction. Within one
+/// encoder, every inter frame is expressed as a change from earlier frames,
+/// which is what makes an inter-frame stream mean anything.
 pub struct Encoder {
     /// Boxed so that its address never changes: libvpx is handed a pointer to
     /// it at init and every call after.
@@ -818,7 +820,8 @@ impl Decoded<'_> {
 /// What the opening bits of a VP9 frame say about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameHeader {
-    /// 0 for 4:2:0, 1 for 4:4:4 at the eight bits every stream here has.
+    /// The VP9 profile, 0–3. Streams encoded here use 0 for 8-bit 4:2:0 and 1
+    /// for 8-bit 4:4:4.
     pub profile: u8,
     /// Whether a decoder that has seen nothing before this frame can start here.
     pub keyframe: bool,
@@ -894,7 +897,7 @@ const LEVELS: [(u8, u64, u32, u16); 14] = [
 /// 1 string since 4:2:0 is not a profile 1 picture, and omitted colour fields
 /// mean BT.709 where the keyframe header says BT.601 (SMPTE 170M primaries,
 /// transfer and matrix — code 6 each, what Chromium's own VP9 parser maps that
-/// header flag to) at studio swing. The level comes from [`LEVELS`] at `fps`
+/// header flag to) at studio swing. The level comes from `LEVELS` at `fps`
 /// frames a second. `None` for a picture no VP9 level covers.
 pub fn codec_string(w: u16, h: u16, chroma: Chroma, fps: u64) -> Option<String> {
     let (profile, sampling) = match chroma {
