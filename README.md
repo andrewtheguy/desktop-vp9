@@ -8,7 +8,7 @@ and the [remotex](https://github.com/andrewtheguy/remotex) gateway both code it.
   the colour matrix and range declared in the bitstream.
 - `Picture`: the 8-bit 4:2:0 or 4:4:4 BT.601 studio-swing planes libvpx reads,
   converted from packed RGB or `B, G, R, X`.
-- `Decoder`: the planes back, for a client and for every test.
+- `Decoder`: the planes back, for every test here and in a user.
 - `frame_header` and `codec_string`: what a frame says about itself, and the
   WebCodecs string a browser's `VideoDecoder` is configured with.
 - `walk::QualityWalk`: the quality and frame rate a link will bear, walked on

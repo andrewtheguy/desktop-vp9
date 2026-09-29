@@ -7,8 +7,8 @@
 //! [`Picture`] holds the planes libvpx reads — 8-bit 4:2:0 or 4:4:4, BT.601 at
 //! studio swing — converted from the packed RGB the gateway's mirror holds or the
 //! `B, G, R, X` a framebuffer does. Behind it a [`Decoder`] gives the planes
-//! back, for the desktop client and for every test here, which reads what the
-//! encoder made with the other half of the same archive.
+//! back, for every test here and in a user, which reads what the encoder made
+//! with the other half of the same archive.
 //!
 //! What a frame says about itself is read here too: [`frame_header`] for the
 //! profile and keyframe bit of a frame this process did not encode, and
