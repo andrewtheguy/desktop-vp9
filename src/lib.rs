@@ -528,13 +528,11 @@ impl Encoder {
     ///
     /// `vpx_codec_enc_config_set` is libvpx's own mechanism for it, and both
     /// halves are needed: the config carries the quantizer bounds and the control
-    /// carries the value `VPX_Q` mode actually reads.
+    /// carries the value `VPX_Q` mode actually reads. A refusal leaves the
+    /// encoder at the quality [`Self::quality`] reports.
     pub fn set_quality(&mut self, quality: u8) -> Result<(), Error> {
         let quality = quality.clamp(QUALITY_MIN, QUALITY_MAX);
         let q = quality_to_q(quality);
-        // Against the committed quality rather than `cfg`: a `cq_level` refused
-        // after the config was accepted leaves `cfg` already at `q`, and the retry
-        // must still send the control.
         if q == quality_to_q(self.quality) {
             self.quality = quality;
             return Ok(());
@@ -549,8 +547,19 @@ impl Encoder {
         // code rather than accepting nonsense.
         unsafe {
             check(vpx::vpx_codec_enc_config_set(&mut *self.ctx, &cfg), "enc_config_set")?;
+            if let Err(refused) = self.control(vpx::vp8e_enc_control_id_VP8E_SET_CQ_LEVEL, q as c_int, "cq_level") {
+                // The bounds go back, so a refusal leaves the encoder wholly at
+                // the quality it reports. Should libvpx refuse the config it was
+                // running on a moment ago, the bounds pinned at `q` are what it
+                // codes at, whatever `cq_level` says: the encoder is at the new
+                // quality, and reports that.
+                if check(vpx::vpx_codec_enc_config_set(&mut *self.ctx, &self.cfg), "enc_config_set").is_err() {
+                    self.cfg = cfg;
+                    self.quality = quality;
+                }
+                return Err(refused);
+            }
             self.cfg = cfg;
-            self.control(vpx::vp8e_enc_control_id_VP8E_SET_CQ_LEVEL, q as c_int, "cq_level")?;
         }
         self.quality = quality;
         Ok(())
