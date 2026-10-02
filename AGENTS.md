@@ -1,7 +1,7 @@
 # Repository instructions
 
 - Strict no backward-compatibility or legacy paths no matter what.
-- One crate, `desktop-vp9`: the one place libvpx is spoken to for the wlshare
+- One crate, `screen-vp9`: the one place libvpx is spoken to for the wlshare
   daemon and the remotex gateway, which each pin it by a release tag of this
   repository. A libvpx setting, the conversion in front of
   it, the codec string or the quality walk changes here and reaches them as a

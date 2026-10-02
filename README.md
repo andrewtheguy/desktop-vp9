@@ -1,4 +1,4 @@
-# desktop-vp9
+# screen-vp9
 
 VP9 for a desktop picture, as [wlshare](https://github.com/andrewtheguy/wlshare)
 and the [remotex](https://github.com/andrewtheguy/remotex) gateway both code it.
@@ -23,5 +23,5 @@ nothing is configured or installed at build time.
 Use it by release tag:
 
 ```toml
-desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0.5" }
+screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.6" }
 ```
